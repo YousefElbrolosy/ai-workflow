@@ -7,6 +7,11 @@ and a couple of checks that the API anticipates scale/load (in-memory
 caching, not re-ingesting on every request) and drift (the /drift endpoint
 and predict's embedded drift check both function).
 
+Isolation: every test in this module runs against a throwaway MODELS_DIR
+and LOG_DIR (tmp_path, monkeypatched module-wide) so running the suite
+never trains over, or logs into, the real production models/ and logs/
+directories.
+
 Run with: python -m pytest tests/test_api.py -q
 """
 
@@ -19,8 +24,25 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from api.app import app as flask_app
+import aavail.logger as logger_module
 import api.app as api_module
+from api.app import app as flask_app
+
+
+@pytest.fixture(scope="module", autouse=True)
+def isolated_environment(tmp_path_factory):
+    """Redirect the API's model directory and the logger's log directory to
+    a scratch location for the whole module, so no test can read, write, or
+    retrain over the real production models/logs on disk."""
+    mp = pytest.MonkeyPatch()
+    models_dir = tmp_path_factory.mktemp("models")
+    logs_dir = tmp_path_factory.mktemp("logs")
+    mp.setattr(api_module, "MODELS_DIR", models_dir)
+    mp.setattr(logger_module, "LOG_DIR", logs_dir)
+    api_module._state.update(metadata=None, models={}, transactions=None,
+                              transactions_data_dirs=None, ts_cache={})
+    yield {"models_dir": models_dir, "logs_dir": logs_dir}
+    mp.undo()
 
 
 @pytest.fixture(scope="module")
@@ -30,8 +52,8 @@ def client():
 
 
 @pytest.fixture(scope="module", autouse=True)
-def trained_model(client):
-    """Train once, on cs-train, before any test in this module runs."""
+def trained_model(client, isolated_environment):
+    """Train once, into the isolated models dir, before any test runs."""
     resp = client.post("/train", json={"data_dirs": ["cs-train"]})
     assert resp.status_code == 200, resp.get_json()
     return resp.get_json()
@@ -48,6 +70,15 @@ def test_train_reports_overall_and_top_countries(trained_model):
     assert "overall" in trained
     assert len(trained) == 11  # overall + 10 countries
     assert "United Kingdom" in trained
+
+
+def test_train_writes_into_the_isolated_models_dir_only(isolated_environment):
+    """Regression guard for the isolation itself: a passing test suite must
+    never leave a trace in the real models/ directory."""
+    real_models_dir = Path(__file__).resolve().parents[1] / "models"
+    assert (isolated_environment["models_dir"] / "overall.joblib").exists()
+    assert (isolated_environment["models_dir"] / "metadata.json").exists()
+    assert api_module.MODELS_DIR != real_models_dir
 
 
 def test_predict_end_of_month(client):
@@ -97,14 +128,20 @@ def test_predict_date_outside_ingested_range_returns_400(client):
     assert resp.status_code == 400
 
 
-def test_predict_without_a_trained_model_returns_503(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(api_module, "MODELS_DIR", tmp_path)
+def test_predict_without_a_trained_model_returns_503(client, tmp_path):
+    """A *different*, empty tmp dir — simulating a freshly deployed API that
+    has never had /train called — not the module's shared isolated dir."""
+    empty_dir = tmp_path / "no-model-yet"
+    empty_dir.mkdir()
+    previous = api_module.MODELS_DIR
+    api_module.MODELS_DIR = empty_dir
     api_module._state["metadata"] = None
     try:
         resp = client.post("/predict", json={"country": "overall", "date": "2019-07-31"})
         assert resp.status_code == 503
     finally:
-        api_module._state["metadata"] = None  # force a clean reload from the real MODELS_DIR
+        api_module.MODELS_DIR = previous
+        api_module._state["metadata"] = None  # force a clean reload from the module's real isolated dir
 
 
 def test_drift_endpoint_returns_a_verdict(client):
@@ -134,6 +171,12 @@ def test_logs_endpoint_reflects_train_calls(client):
     body = resp.get_json()
     assert resp.status_code == 200
     assert any(r["kind"] == "train" for r in body)
+
+
+def test_logs_are_written_into_the_isolated_log_dir_only(isolated_environment):
+    real_logs_dir = Path(__file__).resolve().parents[1] / "logs"
+    assert list(isolated_environment["logs_dir"].glob("predict-*.log"))
+    assert logger_module.LOG_DIR != real_logs_dir
 
 
 def test_predict_reuses_cached_transactions_across_calls(client):
