@@ -1,0 +1,7 @@
+{
+  "n_evaluated": 996,
+  "n_logged": 1326,
+  "corr_abs_error_vs_revenue": 0.79114258276481,
+  "overall_mae": 45374.49632653061,
+  "overall_mape": 18.66301316323647
+}

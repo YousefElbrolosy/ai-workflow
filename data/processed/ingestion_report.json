@@ -1,0 +1,15 @@
+{
+  "cs-train": {
+    "files_found": 21,
+    "files_loaded": 21,
+    "files_failed": [],
+    "rows_read": 815011,
+    "rows_dropped_bad_json_record": 0,
+    "rows_dropped_missing_required_field": 0,
+    "rows_dropped_invalid_date": 0,
+    "rows_dropped_invalid_price": 0,
+    "rows_dropped_bad_debt_adjustment": 3,
+    "rows_dropped_exact_duplicate": 28844,
+    "rows_kept": 786164
+  }
+}
